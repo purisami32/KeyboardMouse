@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="KeyboardMouse.vcxproj" Id="1c36da67-17fd-4c8e-a93b-5ff50364c1d9" />
+</Solution>
