@@ -1,6 +1,4 @@
-﻿// WindowsProject1.cpp : アプリケーションのエントリ ポイントを定義します。
-
-#include <windows.h>
+﻿#include <windows.h>
 #include <shellapi.h>
 #include <chrono>
 #include <cmath>
@@ -34,6 +32,11 @@ std::atomic<bool> g_isUpKeyDown{ false };
 std::atomic<bool> g_isDownKeyDown{ false };
 std::atomic<bool> g_isShiftKeyDown{ false };
 
+// マウスボタンの押しっぱなし状態を保持（キーリピート対策）
+std::atomic<bool> g_isMouseLeftDown{ false };
+std::atomic<bool> g_isMouseMiddleDown{ false };
+std::atomic<bool> g_isMouseRightDown{ false };
+
 // 時刻管理
 static auto g_lastTime = std::chrono::high_resolution_clock::now();
 
@@ -61,6 +64,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     }
 
     WNDCLASSEX wc = { sizeof(WNDCLASSEX) };
+    wc.cbSize = sizeof(WNDCLASSEX);
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
     wc.lpszClassName = TEXT("KEYBOARD_MOUSE_CLASS");
@@ -124,7 +128,6 @@ void ShowNotification(HWND hWnd, bool isEnabled) {
     nidNotify.hWnd = hWnd;
     nidNotify.uID = ID_TRAY_ICON;
     nidNotify.uFlags = NIF_INFO;
-    nidNotify.dwInfoFlags = NIIF_INFO; // 情報アイコンを表示
     nidNotify.dwInfoFlags = NIIF_INFO | NIIF_NOSOUND;
 
     lstrcpyW(nidNotify.szInfoTitle, L"キーボードマウス");
@@ -209,20 +212,47 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
         bool isKeyDown = (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN);
         bool isKeyUp = (wParam == WM_KEYUP || wParam == WM_SYSKEYUP);
 
-        // 機能のON/OFF切り替え (ESCキー)
-        if (isKeyUp && pkbd->vkCode == VK_ESCAPE) {
-            bool nextState = !g_isKeyboardMouseEnabled.load();
-            g_isKeyboardMouseEnabled.store(nextState);
-            if (!nextState) {
-                g_isLeftKeyDown.store(false);
-                g_isRightKeyDown.store(false);
-                g_isUpKeyDown.store(false);
-                g_isDownKeyDown.store(false);
-                g_isShiftKeyDown.store(false);
+        // キー押下状態の保持（トグル切り替えのチャタリング防止用）
+        static bool isToggleTriggered = false;
+
+        // --- 1. Shift / Ctrl の物理状態の判定 ---
+        // フックでイベントをブロックしていても正確に判定するため、入力中のキーvkCodeも考慮します
+        bool isShiftDown = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0 ||
+            (pkbd->vkCode == VK_LSHIFT || pkbd->vkCode == VK_RSHIFT);
+        bool isCtrlDown = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0 ||
+            (pkbd->vkCode == VK_LCONTROL || pkbd->vkCode == VK_RCONTROL);
+
+        // --- 2. 機能のON/OFF切り替え (Shift + Ctrl 同時押し) ---
+        if (isShiftDown && isCtrlDown) {
+            if (isKeyDown && !isToggleTriggered) {
+                isToggleTriggered = true; // キーが離されるまで再発火を防止
+                bool nextState = !g_isKeyboardMouseEnabled.load();
+                g_isKeyboardMouseEnabled.store(nextState);
+
+                if (!nextState) {
+                    g_isLeftKeyDown.store(false);
+                    g_isRightKeyDown.store(false);
+                    g_isUpKeyDown.store(false);
+                    g_isDownKeyDown.store(false);
+                    g_isShiftKeyDown.store(false);
+
+                    // 機能OFF時は押下状態を強制解除
+                    if (g_isMouseLeftDown.exchange(false)) SendMouseClick(MOUSEEVENTF_LEFTUP);
+                    if (g_isMouseMiddleDown.exchange(false)) SendMouseClick(MOUSEEVENTF_MIDDLEUP);
+                    if (g_isMouseRightDown.exchange(false)) SendMouseClick(MOUSEEVENTF_RIGHTUP);
+                }
             }
-            return 1;
+            // Shift + Ctrl 押下中は入力をブロックする
+            if (isKeyDown) return 1;
+        }
+        else {
+            if (isKeyUp) {
+                // 両方のキーが離されたらトリガーフラグをリセット
+                isToggleTriggered = false;
+            }
         }
 
+        // --- 3. キーボードマウス機能（ON時のみ動作） ---
         if (g_isKeyboardMouseEnabled.load()) {
             if (isKeyDown) {
                 switch (pkbd->vkCode) {
@@ -231,9 +261,21 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                 case VK_UP:    case 'I': g_isUpKeyDown.store(true); return 1;
                 case VK_DOWN:  case 'K': g_isDownKeyDown.store(true); return 1;
 
-                case 'F': SendMouseClick(MOUSEEVENTF_LEFTDOWN); return 1;
-                case 'G': SendMouseClick(MOUSEEVENTF_MIDDLEDOWN); return 1;
-                case 'R': SendMouseClick(MOUSEEVENTF_RIGHTDOWN); return 1;
+                case 'F':
+                    if (!g_isMouseLeftDown.exchange(true)) {
+                        SendMouseClick(MOUSEEVENTF_LEFTDOWN);
+                    }
+                    return 1;
+                case 'G':
+                    if (!g_isMouseMiddleDown.exchange(true)) {
+                        SendMouseClick(MOUSEEVENTF_MIDDLEDOWN);
+                    }
+                    return 1;
+                case 'R':
+                    if (!g_isMouseRightDown.exchange(true)) {
+                        SendMouseClick(MOUSEEVENTF_RIGHTDOWN);
+                    }
+                    return 1;
 
                 case 'Y': {
                     int multiplier = g_isShiftKeyDown.load() ? 4 : 1;
@@ -258,9 +300,21 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                 case VK_DOWN:  case 'K': g_isDownKeyDown.store(false); return 1;
                 case VK_LSHIFT: case VK_RSHIFT: g_isShiftKeyDown.store(false); return 1;
 
-                case 'F': SendMouseClick(MOUSEEVENTF_LEFTUP); return 1;
-                case 'G': SendMouseClick(MOUSEEVENTF_MIDDLEUP); return 1;
-                case 'R': SendMouseClick(MOUSEEVENTF_RIGHTUP); return 1;
+                case 'F':
+                    if (g_isMouseLeftDown.exchange(false)) {
+                        SendMouseClick(MOUSEEVENTF_LEFTUP);
+                    }
+                    return 1;
+                case 'G':
+                    if (g_isMouseMiddleDown.exchange(false)) {
+                        SendMouseClick(MOUSEEVENTF_MIDDLEUP);
+                    }
+                    return 1;
+                case 'R':
+                    if (g_isMouseRightDown.exchange(false)) {
+                        SendMouseClick(MOUSEEVENTF_RIGHTUP);
+                    }
+                    return 1;
                 }
             }
         }
