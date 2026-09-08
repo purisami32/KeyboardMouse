@@ -216,14 +216,25 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
         static bool isToggleTriggered = false;
 
         // --- 1. Shift / Ctrl の物理状態の判定 ---
-        // フックでイベントをブロックしていても正確に判定するため、入力中のキーvkCodeも考慮します
         bool isShiftDown = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0 ||
             (pkbd->vkCode == VK_LSHIFT || pkbd->vkCode == VK_RSHIFT);
         bool isCtrlDown = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0 ||
             (pkbd->vkCode == VK_LCONTROL || pkbd->vkCode == VK_RCONTROL);
 
+        // --- Ctrl キー単体組み合わせ（Ctrl + V, C, F）の透過判定 ---
+        if (isCtrlDown && !isShiftDown) {
+            if (pkbd->vkCode == 'V' || pkbd->vkCode == 'C' || pkbd->vkCode == 'F') {
+                return CallNextHookEx(hLowLevelKeyboardHook, nCode, wParam, lParam);
+            }
+        }
+
         // --- 2. 機能のON/OFF切り替え (Shift + Ctrl 同時押し) ---
         if (isShiftDown && isCtrlDown) {
+            // Shift + Ctrl 押下時でも V, C, F キーは透過させる
+            if (pkbd->vkCode == 'V' || pkbd->vkCode == 'C' || pkbd->vkCode == 'F') {
+                return CallNextHookEx(hLowLevelKeyboardHook, nCode, wParam, lParam);
+            }
+
             if (isKeyDown && !isToggleTriggered) {
                 isToggleTriggered = true; // キーが離されるまで再発火を防止
                 bool nextState = !g_isKeyboardMouseEnabled.load();
@@ -256,10 +267,11 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
         if (g_isKeyboardMouseEnabled.load()) {
             if (isKeyDown) {
                 switch (pkbd->vkCode) {
-                case VK_LEFT:  case 'J': g_isLeftKeyDown.store(true); return 1;
-                case VK_RIGHT: case 'L': g_isRightKeyDown.store(true); return 1;
-                case VK_UP:    case 'I': g_isUpKeyDown.store(true); return 1;
-                case VK_DOWN:  case 'K': g_isDownKeyDown.store(true); return 1;
+                    // 矢印キー（VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN）は除外して透過させる
+                case 'J': g_isLeftKeyDown.store(true); return 1;
+                case 'L': g_isRightKeyDown.store(true); return 1;
+                case 'I': g_isUpKeyDown.store(true); return 1;
+                case 'K': g_isDownKeyDown.store(true); return 1;
 
                 case 'F':
                     if (!g_isMouseLeftDown.exchange(true)) {
@@ -294,10 +306,11 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
             }
             else if (isKeyUp) {
                 switch (pkbd->vkCode) {
-                case VK_LEFT:  case 'J': g_isLeftKeyDown.store(false); return 1;
-                case VK_RIGHT: case 'L': g_isRightKeyDown.store(false); return 1;
-                case VK_UP:    case 'I': g_isUpKeyDown.store(false); return 1;
-                case VK_DOWN:  case 'K': g_isDownKeyDown.store(false); return 1;
+                    // 矢印キー（VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN）は除外して透過させる
+                case 'J': g_isLeftKeyDown.store(false); return 1;
+                case 'L': g_isRightKeyDown.store(false); return 1;
+                case 'I': g_isUpKeyDown.store(false); return 1;
+                case 'K': g_isDownKeyDown.store(false); return 1;
                 case VK_LSHIFT: case VK_RSHIFT: g_isShiftKeyDown.store(false); return 1;
 
                 case 'F':
