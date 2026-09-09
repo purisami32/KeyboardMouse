@@ -17,6 +17,9 @@ constexpr double SPEED_INCHES_PER_SEC = 3.0;
 constexpr double SHIFT_MULTI = 4;
 constexpr double DIAGONAL_SCALE = 0.7071067811865475; // 1 / sqrt(2)
 
+// 四隅ジャンプ時の内側マージン比率（0.25 = 画面端から25%内側の位置）
+constexpr double MARGIN_RATIO = 0.25;
+
 // グローバル変数
 HINSTANCE hInst = nullptr;
 NOTIFYICONDATA nid = { 0 };
@@ -49,6 +52,7 @@ void ShowNotification(HWND hWnd, bool isEnabled);
 void MouseProc(HWND);
 void SendMouseClick(DWORD flags);
 void SendMouseWheel(int scrollAmount);
+void MoveCursorToCorner(int corner);
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     _In_opt_ HINSTANCE hPrevInstance,
@@ -161,6 +165,41 @@ void UpdateTrayIcon(HWND hWnd) {
     ShowNotification(hWnd, isEnabled);
 }
 
+// 画面の内側4箇所へカーソルを移動する処理
+// 0: 左上内側, 1: 左下内側, 2: 右上内側, 3: 右下内側
+void MoveCursorToCorner(int corner) {
+    int screenWidth = GetSystemMetrics(SM_CXSCREEN);
+    int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+
+    // 画面端から内側に寄せるピクセル数を計算
+    int marginX = static_cast<int>(screenWidth * MARGIN_RATIO);
+    int marginY = static_cast<int>(screenHeight * MARGIN_RATIO);
+
+    int x = 0;
+    int y = 0;
+
+    switch (corner) {
+    case 0: // 左上（内側）
+        x = marginX;
+        y = marginY;
+        break;
+    case 1: // 左下（内側）
+        x = marginX;
+        y = screenHeight - marginY;
+        break;
+    case 2: // 右上（内側）
+        x = screenWidth - marginX;
+        y = marginY;
+        break;
+    case 3: // 右下（内側）
+        x = screenWidth - marginX;
+        y = screenHeight - marginY;
+        break;
+    }
+
+    SetCursorPos(x, y);
+}
+
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
     case WM_CREATE:
@@ -215,20 +254,19 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
         // キー押下状態の保持（トグル切り替えのチャタリング防止用）
         static bool isToggleTriggered = false;
 
-        // --- 1. Shift / Ctrl の物理状態の判定 ---
-        bool isShiftDown = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0 ||
-            (pkbd->vkCode == VK_LSHIFT || pkbd->vkCode == VK_RSHIFT);
-        bool isCtrlDown = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0 ||
-            (pkbd->vkCode == VK_LCONTROL || pkbd->vkCode == VK_RCONTROL);
-
-        // --- Ctrl キー単体組み合わせ（Ctrl + V, C, F）の透過判定 ---
-        if (isCtrlDown && !isShiftDown) {
-            if (pkbd->vkCode == 'V' || pkbd->vkCode == 'C' || pkbd->vkCode == 'F') {
-                return CallNextHookEx(hLowLevelKeyboardHook, nCode, wParam, lParam);
-            }
+        // Shiftキー単体の状態更新（※ここでは判定のためにフラグを更新するのみでブロックはしない）
+        if (pkbd->vkCode == VK_LSHIFT || pkbd->vkCode == VK_RSHIFT || pkbd->vkCode == VK_SHIFT) {
+            if (isKeyDown) g_isShiftKeyDown.store(true);
+            else if (isKeyUp) g_isShiftKeyDown.store(false);
         }
 
-        // --- 2. 機能のON/OFF切り替え (Shift + Ctrl 同時押し) ---
+        // 修飾キー（Shift / Ctrl / Win）のリアルタイム物理状態の判定
+        bool isShiftDown = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0 || g_isShiftKeyDown.load();
+        bool isCtrlDown = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0 ||
+            (pkbd->vkCode == VK_LCONTROL || pkbd->vkCode == VK_RCONTROL);
+        bool isWinDown = (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 || (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
+
+        // --- 1. 機能のON/OFF切り替え (Shift + Ctrl 同時押し) ---
         if (isShiftDown && isCtrlDown) {
             // Shift + Ctrl 押下時でも V, C, F キーは透過させる
             if (pkbd->vkCode == 'V' || pkbd->vkCode == 'C' || pkbd->vkCode == 'F') {
@@ -249,17 +287,46 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 
                     // 機能OFF時は押下状態を強制解除
                     if (g_isMouseLeftDown.exchange(false)) SendMouseClick(MOUSEEVENTF_LEFTUP);
-                    if (g_isMouseMiddleDown.exchange(false)) SendMouseClick(MOUSEEVENTF_MIDDLEUP);
+                    if (g_isMouseMiddleDown.exchange(false)) SendMouseClick(MOUSEEVENTF_MIDDLEDOWN);
                     if (g_isMouseRightDown.exchange(false)) SendMouseClick(MOUSEEVENTF_RIGHTUP);
                 }
             }
-            // Shift + Ctrl 押下中は入力をブロックする
+            // Shift / Ctrl キー自体の押し離しでブロックせず透過させる
+            if (pkbd->vkCode == VK_LSHIFT || pkbd->vkCode == VK_RSHIFT || pkbd->vkCode == VK_SHIFT ||
+                pkbd->vkCode == VK_LCONTROL || pkbd->vkCode == VK_RCONTROL || pkbd->vkCode == VK_CONTROL) {
+                return CallNextHookEx(hLowLevelKeyboardHook, nCode, wParam, lParam);
+            }
             if (isKeyDown) return 1;
         }
         else {
             if (isKeyUp) {
-                // 両方のキーが離されたらトリガーフラグをリセット
                 isToggleTriggered = false;
+            }
+        }
+
+        // --- 2. 各種組み合わせの透過判定 ---
+
+        // Shift キー単体または Ctrl キー単体の場合は常に透過させる
+        if (pkbd->vkCode == VK_LSHIFT || pkbd->vkCode == VK_RSHIFT || pkbd->vkCode == VK_SHIFT ||
+            pkbd->vkCode == VK_LCONTROL || pkbd->vkCode == VK_RCONTROL || pkbd->vkCode == VK_CONTROL) {
+            return CallNextHookEx(hLowLevelKeyboardHook, nCode, wParam, lParam);
+        }
+
+        // [透過処理1] Shift + 矢印キー の透過
+        if (isShiftDown && (pkbd->vkCode == VK_LEFT || pkbd->vkCode == VK_RIGHT ||
+            pkbd->vkCode == VK_UP || pkbd->vkCode == VK_DOWN)) {
+            return CallNextHookEx(hLowLevelKeyboardHook, nCode, wParam, lParam);
+        }
+
+        // [透過処理2] Shift + Win + S の透過
+        if (isShiftDown && isWinDown && pkbd->vkCode == 'S') {
+            return CallNextHookEx(hLowLevelKeyboardHook, nCode, wParam, lParam);
+        }
+
+        // [透過処理3] Ctrl キー単体組み合わせ（Ctrl + V, C, F）の透過判定
+        if (isCtrlDown && !isShiftDown) {
+            if (pkbd->vkCode == 'V' || pkbd->vkCode == 'C' || pkbd->vkCode == 'F') {
+                return CallNextHookEx(hLowLevelKeyboardHook, nCode, wParam, lParam);
             }
         }
 
@@ -267,11 +334,16 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
         if (g_isKeyboardMouseEnabled.load()) {
             if (isKeyDown) {
                 switch (pkbd->vkCode) {
-                    // 矢印キー（VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN）は除外して透過させる
                 case 'J': g_isLeftKeyDown.store(true); return 1;
                 case 'L': g_isRightKeyDown.store(true); return 1;
                 case 'I': g_isUpKeyDown.store(true); return 1;
                 case 'K': g_isDownKeyDown.store(true); return 1;
+
+                    // 画面の内側4点へのジャンプ処理
+                case 'W': MoveCursorToCorner(0); return 1; // 左上内側
+                case 'X': MoveCursorToCorner(1); return 1; // 左下内側
+                case 'O': MoveCursorToCorner(2); return 1; // 右上内側
+                case VK_OEM_PERIOD: MoveCursorToCorner(3); return 1; // 右下内側 ('>' / '.' キー)
 
                 case 'F':
                     if (!g_isMouseLeftDown.exchange(true)) {
@@ -299,19 +371,20 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                     SendMouseWheel(-WHEEL_DELTA * multiplier);
                     return 1;
                 }
-                case VK_LSHIFT: case VK_RSHIFT:
-                    g_isShiftKeyDown.store(true);
-                    return 1;
                 }
             }
             else if (isKeyUp) {
                 switch (pkbd->vkCode) {
-                    // 矢印キー（VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN）は除外して透過させる
                 case 'J': g_isLeftKeyDown.store(false); return 1;
                 case 'L': g_isRightKeyDown.store(false); return 1;
                 case 'I': g_isUpKeyDown.store(false); return 1;
                 case 'K': g_isDownKeyDown.store(false); return 1;
-                case VK_LSHIFT: case VK_RSHIFT: g_isShiftKeyDown.store(false); return 1;
+
+                case 'W':
+                case 'X':
+                case 'O':
+                case VK_OEM_PERIOD:
+                    return 1;
 
                 case 'F':
                     if (g_isMouseLeftDown.exchange(false)) {
