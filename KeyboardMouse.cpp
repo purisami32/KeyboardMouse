@@ -14,7 +14,7 @@ constexpr UINT     WM_NOTIFYICON = WM_USER + 1;
 
 // 移動速度に関する設定
 constexpr double SPEED_INCHES_PER_SEC = 3.0;
-constexpr double SHIFT_MULTI = 4;
+constexpr double SPEED_MULTI = 4.0; // 4倍速倍率
 constexpr double DIAGONAL_SCALE = 0.7071067811865475; // 1 / sqrt(2)
 
 // 四隅ジャンプ時の内側マージン比率（0.25 = 画面端から25%内側の位置）
@@ -33,7 +33,7 @@ std::atomic<bool> g_isLeftKeyDown{ false };
 std::atomic<bool> g_isRightKeyDown{ false };
 std::atomic<bool> g_isUpKeyDown{ false };
 std::atomic<bool> g_isDownKeyDown{ false };
-std::atomic<bool> g_isShiftKeyDown{ false };
+std::atomic<bool> g_isSpaceKeyDown{ false }; // 4倍速移動用のスペースキー状態
 
 // マウスボタンの押しっぱなし状態を保持（キーリピート対策）
 std::atomic<bool> g_isMouseLeftDown{ false };
@@ -251,29 +251,20 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
         bool isKeyDown = (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN);
         bool isKeyUp = (wParam == WM_KEYUP || wParam == WM_SYSKEYUP);
 
-        // キー押下状態の保持（トグル切り替えのチャタリング防止用）
+        // トグル切り替えの二重発火防止フラグ
         static bool isToggleTriggered = false;
 
-        // Shiftキー単体の状態更新（※ここでは判定のためにフラグを更新するのみでブロックはしない）
-        if (pkbd->vkCode == VK_LSHIFT || pkbd->vkCode == VK_RSHIFT || pkbd->vkCode == VK_SHIFT) {
-            if (isKeyDown) g_isShiftKeyDown.store(true);
-            else if (isKeyUp) g_isShiftKeyDown.store(false);
-        }
+        // Ctrl および Shift キーのリアルタイム物理状態を取得
+        bool isCtrlDown = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+        bool isShiftDown = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
 
-        // 修飾キー（Shift / Ctrl / Win）のリアルタイム物理状態の判定
-        bool isShiftDown = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0 || g_isShiftKeyDown.load();
-        bool isCtrlDown = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0 ||
-            (pkbd->vkCode == VK_LCONTROL || pkbd->vkCode == VK_RCONTROL);
-        bool isWinDown = (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 || (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
+        // 対象キーが Ctrl または Shift かどうかを判定
+        bool isCtrlKey = (pkbd->vkCode == VK_LCONTROL || pkbd->vkCode == VK_RCONTROL || pkbd->vkCode == VK_CONTROL);
+        bool isShiftKey = (pkbd->vkCode == VK_LSHIFT || pkbd->vkCode == VK_RSHIFT || pkbd->vkCode == VK_SHIFT);
 
-        // --- 1. 機能のON/OFF切り替え (Shift + Ctrl 同時押し) ---
-        if (isShiftDown && isCtrlDown) {
-            // Shift + Ctrl 押下時でも V, C, F キーは透過させる
-            if (pkbd->vkCode == 'V' || pkbd->vkCode == 'C' || pkbd->vkCode == 'F') {
-                return CallNextHookEx(hLowLevelKeyboardHook, nCode, wParam, lParam);
-            }
-
-            if (isKeyDown && !isToggleTriggered) {
+        // --- 1. 機能のON/OFF切り替え (Ctrl + Shift 同時押し) ---
+        if (isCtrlDown && isShiftDown) {
+            if (!isToggleTriggered) {
                 isToggleTriggered = true; // キーが離されるまで再発火を防止
                 bool nextState = !g_isKeyboardMouseEnabled.load();
                 g_isKeyboardMouseEnabled.store(nextState);
@@ -283,48 +274,27 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                     g_isRightKeyDown.store(false);
                     g_isUpKeyDown.store(false);
                     g_isDownKeyDown.store(false);
-                    g_isShiftKeyDown.store(false);
+                    g_isSpaceKeyDown.store(false);
 
                     // 機能OFF時は押下状態を強制解除
                     if (g_isMouseLeftDown.exchange(false)) SendMouseClick(MOUSEEVENTF_LEFTUP);
-                    if (g_isMouseMiddleDown.exchange(false)) SendMouseClick(MOUSEEVENTF_MIDDLEDOWN);
+                    if (g_isMouseMiddleDown.exchange(false)) SendMouseClick(MOUSEEVENTF_MIDDLEUP);
                     if (g_isMouseRightDown.exchange(false)) SendMouseClick(MOUSEEVENTF_RIGHTUP);
                 }
             }
-            // Shift / Ctrl キー自体の押し離しでブロックせず透過させる
-            if (pkbd->vkCode == VK_LSHIFT || pkbd->vkCode == VK_RSHIFT || pkbd->vkCode == VK_SHIFT ||
-                pkbd->vkCode == VK_LCONTROL || pkbd->vkCode == VK_RCONTROL || pkbd->vkCode == VK_CONTROL) {
-                return CallNextHookEx(hLowLevelKeyboardHook, nCode, wParam, lParam);
-            }
-            if (isKeyDown) return 1;
         }
         else {
-            if (isKeyUp) {
-                isToggleTriggered = false;
-            }
+            // 両方押されている状態が解除されたらロックを解除
+            isToggleTriggered = false;
         }
 
-        // --- 2. 各種組み合わせの透過判定 ---
-
-        // Shift キー単体または Ctrl キー単体の場合は常に透過させる
-        if (pkbd->vkCode == VK_LSHIFT || pkbd->vkCode == VK_RSHIFT || pkbd->vkCode == VK_SHIFT ||
-            pkbd->vkCode == VK_LCONTROL || pkbd->vkCode == VK_RCONTROL || pkbd->vkCode == VK_CONTROL) {
+        // --- 2. 修飾キー（Ctrl, Shift）単体の透過判定 ---
+        if (isCtrlKey || isShiftKey) {
             return CallNextHookEx(hLowLevelKeyboardHook, nCode, wParam, lParam);
         }
 
-        // [透過処理1] Shift + 矢印キー の透過
-        if (isShiftDown && (pkbd->vkCode == VK_LEFT || pkbd->vkCode == VK_RIGHT ||
-            pkbd->vkCode == VK_UP || pkbd->vkCode == VK_DOWN)) {
-            return CallNextHookEx(hLowLevelKeyboardHook, nCode, wParam, lParam);
-        }
-
-        // [透過処理2] Shift + Win + S の透過
-        if (isShiftDown && isWinDown && pkbd->vkCode == 'S') {
-            return CallNextHookEx(hLowLevelKeyboardHook, nCode, wParam, lParam);
-        }
-
-        // [透過処理3] Ctrl キー単体組み合わせ（Ctrl + V, C, F）の透過判定
-        if (isCtrlDown && !isShiftDown) {
+        // [透過処理] Ctrl キー組み合わせ（Ctrl + V, C, F）の透過判定
+        if (isCtrlDown) {
             if (pkbd->vkCode == 'V' || pkbd->vkCode == 'C' || pkbd->vkCode == 'F') {
                 return CallNextHookEx(hLowLevelKeyboardHook, nCode, wParam, lParam);
             }
@@ -338,6 +308,7 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                 case 'L': g_isRightKeyDown.store(true); return 1;
                 case 'I': g_isUpKeyDown.store(true); return 1;
                 case 'K': g_isDownKeyDown.store(true); return 1;
+                case VK_SPACE: g_isSpaceKeyDown.store(true); return 1; // スペースキー（4倍速移動用）
 
                     // 画面の内側4点へのジャンプ処理
                 case 'W': MoveCursorToCorner(0); return 1; // 左上内側
@@ -355,19 +326,19 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                         SendMouseClick(MOUSEEVENTF_MIDDLEDOWN);
                     }
                     return 1;
-                case 'R':
+                case 'T': // 右クリック
                     if (!g_isMouseRightDown.exchange(true)) {
                         SendMouseClick(MOUSEEVENTF_RIGHTDOWN);
                     }
                     return 1;
 
                 case 'Y': {
-                    int multiplier = g_isShiftKeyDown.load() ? 4 : 1;
+                    int multiplier = g_isSpaceKeyDown.load() ? static_cast<int>(SPEED_MULTI) : 1;
                     SendMouseWheel(WHEEL_DELTA * multiplier);
                     return 1;
                 }
                 case 'H': {
-                    int multiplier = g_isShiftKeyDown.load() ? 4 : 1;
+                    int multiplier = g_isSpaceKeyDown.load() ? static_cast<int>(SPEED_MULTI) : 1;
                     SendMouseWheel(-WHEEL_DELTA * multiplier);
                     return 1;
                 }
@@ -379,11 +350,14 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                 case 'L': g_isRightKeyDown.store(false); return 1;
                 case 'I': g_isUpKeyDown.store(false); return 1;
                 case 'K': g_isDownKeyDown.store(false); return 1;
+                case VK_SPACE: g_isSpaceKeyDown.store(false); return 1;
 
                 case 'W':
                 case 'X':
                 case 'O':
                 case VK_OEM_PERIOD:
+                case 'Y':
+                case 'H':
                     return 1;
 
                 case 'F':
@@ -396,7 +370,7 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                         SendMouseClick(MOUSEEVENTF_MIDDLEUP);
                     }
                     return 1;
-                case 'R':
+                case 'T': // 右クリック解除
                     if (g_isMouseRightDown.exchange(false)) {
                         SendMouseClick(MOUSEEVENTF_RIGHTUP);
                     }
@@ -439,8 +413,10 @@ void MouseProc(HWND hWnd) {
 
     // 移動量計算
     double pixelsPerSecond = SPEED_INCHES_PER_SEC * static_cast<double>(dpi);
-    if (g_isShiftKeyDown.load()) {
-        pixelsPerSecond *= SHIFT_MULTI;
+
+    // スペースキーが押されている場合は4倍速を適用
+    if (g_isSpaceKeyDown.load()) {
+        pixelsPerSecond *= SPEED_MULTI;
     }
 
     double moveX = dirX * pixelsPerSecond * deltaTime;
